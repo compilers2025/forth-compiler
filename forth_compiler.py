@@ -65,7 +65,7 @@ class Lexer:
                 match = pattern.match(self.source_code, self.position)
                 if match:
                     value = match.group(0)
-                    if token_type != "WHITESPACE":  # Ignore whitespace tokens
+                    if token_type != "WHITESPACE":
                         tokens.append(Token(token_type, value, self.position))
                     self.position += len(value)
                     break
@@ -215,15 +215,11 @@ class ForthVM:
             with open(assembly_file, 'r') as f:
                 assembly = f.readlines()
 
-            # Process each assembly instruction
             for line in assembly:
                 line = line.strip()
-
-                # Skip empty lines, sections, and labels
                 if not line or line.startswith('.') or line.endswith(':'):
                     continue
 
-                # Handle number pushing
                 if 'movq $' in line:
                     match = re.search(r'\$(\d+)', line)
                     if match:
@@ -242,17 +238,20 @@ class ForthVM:
                         self.registers['rbx'] = self.stack.pop()
 
                 elif 'imulq %rbx, %rax' in line:
-                    self.registers['rax'] *= self.registers['rbx']
+                    self.registers['rax'] = self.registers['rbx'] * \
+                        self.registers['rax']
                     self.stack.append(self.registers['rax'])
 
-                elif 'imulq %rax, %rax' in line:
-                    # Handle square operation
-                    self.registers['rax'] *= self.registers['rax']
+                elif 'subq %rax, %rbx' in line:
+                    self.registers['rax'] = self.registers['rbx'] - \
+                        self.registers['rax']
                     self.stack.append(self.registers['rax'])
 
-            # Write final stack state to output.txt
-            with open('output.txt', 'w') as f:
-                f.write(f"Final stack: {self.stack}")
+            with open('output.txt', 'w') as out:
+                if self.stack:
+                    out.write(f"FINAL STACK:[{self.stack[-1]}]")
+                else:
+                    out.write("Empty stack")
 
         except Exception as e:
             print(f"Error executing assembly: {str(e)}")
@@ -265,38 +264,102 @@ def generate_assembly(ast, output_file):
         "_start:"
     ]
 
+    user_defined_words = {}
+    main_body = []
+
     for node in ast:
+        if isinstance(node, DefinitionNode):
+            user_defined_words[node.name] = node.body
+        else:
+            main_body.append(node)
+
+    def emit_node(node):
         if isinstance(node, NumberNode):
-            # Push number onto stack
-            assembly.extend([
+            return [
                 f"    movq ${node.value}, %rax",
                 "    pushq %rax"
-            ])
+            ]
         elif isinstance(node, WordNode):
-            if node.name == "dup":
-                assembly.extend([
+            if node.name in user_defined_words:
+                output = []
+                for sub_node in user_defined_words[node.name]:
+                    output.extend(emit_node(sub_node))
+                return output
+            elif node.name == "dup":
+                return [
                     "    popq %rax",
-                    "    pushq %rax",
+                    "    movq %rax, %rbx",
+                    "    pushq %rbx",
                     "    pushq %rax"
-                ])
+                ]
+
             elif node.name == "*":
-                assembly.extend([
+                return [
+                    "    popq %rbx",
+                    "    popq %rax",
+                    "    imulq %rbx, %rax",
+                ]
+
+            elif node.name == "+":
+                return [
                     "    popq %rax",
                     "    popq %rbx",
+                    "    addq %rbx, %rax",
+                    "    pushq %rax"
+                ]
+            elif node.name == "-":
+                return [
+                    "    popq %rax",
+                    "    popq %rbx",
+                    "    subq %rax, %rbx",
+                    "    movq %rbx, %rax",
+                    "    pushq %rax"
+                ]
+
+            elif node.name == "/":
+                return [
+                    "    popq %rbx",
+                    "    popq %rax",
+                    "    cqto",
+                    "    idivq %rbx",
+                    "    pushq %rax"
+                ]
+            elif node.name == "drop":
+                return [
+                    "    popq %rax"
+                ]
+            elif node.name == "swap":
+                return [
+                    "    popq %rax",
+                    "    popq %rbx",
+                    "    pushq %rax",
+                    "    pushq %rbx"
+                ]
+            elif node.name == "square":
+                return [
+                    "    popq %rax",
+                    "    pushq %rax",
+                    "    pushq %rax",
+                    "    popq %rbx",
+                    "    popq %rax",
                     "    imulq %rbx, %rax",
                     "    pushq %rax"
-                ])
-            elif node.name == "square":
-                assembly.extend([
-                    "    popq %rax",
-                    "    imulq %rax, %rax",
-                    "    pushq %rax"
-                ])
-        elif isinstance(node, DefinitionNode):
-            # Skip definitions as they're handled through the word implementations
-            continue
+                ]
 
-    # Add exit sequence
+            elif node.name == ".":
+                return [
+                    "    popq %rax",
+                    "    movq $0, %rbx"
+                ]
+
+            else:
+                raise ValueError(f"Unknown word: {node.name}")
+        else:
+            raise ValueError(f"Unexpected node type: {node}")
+
+    for node in main_body:
+        assembly.extend(emit_node(node))
+
     assembly.extend([
         "    movq $60, %rax",
         "    xor %rdi, %rdi",
@@ -306,22 +369,15 @@ def generate_assembly(ast, output_file):
     with open(output_file, 'w') as f:
         f.write('\n'.join(assembly))
 
-
 # Test the implementation
+
+
 def main():
     try:
-        # Test with the example input
-        source_code = ": cube dup dup * * ; 3 cube"
 
-        # Write to inputs.txt
-        with open('inputs.txt', 'w') as f:
-            f.write(source_code)
-
-        # Read from inputs.txt
         with open('inputs.txt', 'r') as f:
             source_code = f.read()
 
-        # Process the code
         lexer = Lexer(source_code)
         tokens = lexer.tokenize()
 
@@ -331,17 +387,14 @@ def main():
         semantic = SemanticAnalyzer(ast)
         semantic.analyze()
 
-        # Generate and execute assembly
         generate_assembly(ast, "assembly.txt")
         print("Assembly code generated successfully.")
 
         vm = ForthVM()
         vm.run_assembly("assembly.txt")
 
-        # Verify the output
         with open('output.txt', 'r') as f:
             result = f.read()
-            print(f"Generated output: {result}")
 
     except Exception as e:
         print(f"Error in compilation process: {str(e)}")
@@ -349,3 +402,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
